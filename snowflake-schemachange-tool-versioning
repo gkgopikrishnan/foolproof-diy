@@ -1,0 +1,547 @@
+import os
+import re
+import snowflake.connector
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def create_snowflake_session(database, schema_name):
+    """
+    Establish a connection to Snowflake.
+    
+    :param database: The database to connect to.
+    :param schema_name: The schema to use.
+    :return: A Snowflake connection object.
+    """
+    conn = snowflake.connector.connect(
+        user='sf-account-username',
+        password='sf-account-password',
+        account='sf-account-id',
+        warehouse='warehouse-name',
+        database=database,
+        schema=schema_name
+    )
+    logging.info(f"Connected to Snowflake: {database}.{schema_name}")
+    return conn
+
+def check_table_exists(session, table_name, schema_name):
+    """
+    Check if a table exists in the specified schema.
+    
+    :param session: The Snowflake session.
+    :param table_name: The table name to check.
+    :param schema_name: The schema name to check.
+    :return: True if the table exists, False otherwise.
+    """
+    query = f"""
+    SELECT COUNT(*) 
+    FROM INFORMATION_SCHEMA.TABLES 
+    WHERE TABLE_NAME = '{table_name.upper()}' 
+    AND TABLE_SCHEMA = '{schema_name.upper()}' 
+    AND TABLE_TYPE = 'BASE TABLE'
+    """
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        result = cursor.fetchone()
+        count = result[0]
+        logging.info(f"Table '{table_name}' exists: {count > 0}")
+        return count > 0
+    finally:
+        cursor.close()
+
+def check_view_exists(session, view_name, schema_name):
+    """
+    Check if a view exists in the specified schema.
+    
+    :param session: The Snowflake session.
+    :param view_name: The view name to check.
+    :param schema_name: The schema name to check.
+    :return: True if the view exists, False otherwise.
+    """
+    query = f"""
+    SELECT COUNT(*) 
+    FROM INFORMATION_SCHEMA.VIEWS 
+    WHERE TABLE_NAME = '{view_name.upper()}' 
+    AND TABLE_SCHEMA = '{schema_name.upper()}'
+    """
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        result = cursor.fetchone()
+        count = result[0]
+        logging.info(f"View '{view_name}' exists: {count > 0}")
+        return count > 0
+    finally:
+        cursor.close()
+
+def check_task_exists(session, task_name, schema_name):
+    """
+    Check if a task exists in the specified schema.
+    
+    :param session: The Snowflake session.
+    :param task_name: The task name to check.
+    :param schema_name: The schema name to check.
+    :return: True if the task exists, False otherwise.
+    """
+    query = f"SHOW TASKS IN {schema_name.upper()}"
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        task_found = any(task_name.lower() in row[1].lower() for row in rows)
+        logging.info(f"Task '{task_name}' exists: {task_found}")
+        return task_found
+    except Exception as e:
+        logging.error(f"Error checking task existence: {e}")
+        return False
+    finally:
+        cursor.close()
+
+def check_stage_exists(session, stage_name, schema_name):
+    """
+    Check if a stage exists in the specified schema.
+    
+    :param session: The Snowflake session.
+    :param stage_name: The stage name to check.
+    :param schema_name: The schema name to check.
+    :return: True if the stage exists, False otherwise.
+    """
+    query = f"SHOW STAGES IN {schema_name.upper()}"
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        stage_found = any(stage_name.lower() in row[1].lower() for row in rows)
+        logging.info(f"Stage '{stage_name}' exists: {stage_found}")
+        return stage_found
+    except Exception as e:
+        logging.error(f"Error checking stage existence: {e}")
+        return False
+    finally:
+        cursor.close()
+
+def check_procedure_exists(session, procedure_name, schema_name):
+    """
+    Check if a procedure exists in the specified schema.
+    
+    :param session: The Snowflake session.
+    :param procedure_name: The procedure name to check.
+    :param schema_name: The schema name to check.
+    :return: True if the procedure exists, False otherwise.
+    """
+    query = f"""
+    SELECT COUNT(*) 
+    FROM INFORMATION_SCHEMA.PROCEDURES 
+    WHERE procedure_name = '{procedure_name.upper()}' 
+    AND PROCEDURE_SCHEMA = '{schema_name.upper()}'
+    """
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        result = cursor.fetchone()
+        count = result[0]
+        logging.info(f"Procedure '{procedure_name}' exists: {count > 0}")
+        return count > 0
+    finally:
+        cursor.close()
+
+def check_function_exists(session, function_name, schema_name):
+    """
+    Check if a function exists in the specified schema.
+    
+    :param session: The Snowflake session.
+    :param function_name: The function name to check.
+    :param schema_name: The schema name to check.
+    :return: True if the function exists, False otherwise.
+    """
+    query = f"""
+    SELECT COUNT(*) 
+    FROM INFORMATION_SCHEMA.FUNCTIONS 
+    WHERE function_name = '{function_name.upper()}' 
+    AND function_SCHEMA = '{schema_name.upper()}'
+    """
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        result = cursor.fetchone()
+        count = result[0]
+        logging.info(f"Function '{function_name}' exists: {count > 0}")
+        return count > 0
+    except Exception as e:
+        logging.error(f"Error checking function existence: {e}")
+        return False
+    finally:
+        cursor.close()
+
+def fn_get_function_ddl(session, function_name, schema_name, database):
+    """
+    Retrieve the DDL statement for a specified function.
+    
+    :param session: The Snowflake session.
+    :param function_name: The name of the function.
+    :param schema_name: The schema name.
+    :param database: The database name.
+    :return: The DDL statement for the function.
+    """
+    query = f"""
+    SELECT FUNCTION_NAME, FUNCTION_SCHEMA, FUNCTION_CATALOG, DATA_TYPE, FUNCTION_LANGUAGE, 
+           FUNCTION_DEFINITION, ARGUMENT_SIGNATURE, IS_EXTERNAL, API_INTEGRATION
+    FROM INFORMATION_SCHEMA.FUNCTIONS
+    WHERE FUNCTION_NAME = '{function_name.upper()}'
+    AND FUNCTION_SCHEMA = '{schema_name.upper()}'
+    AND FUNCTION_CATALOG = '{database.upper()}'
+    """
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        result = cursor.fetchone()
+        if result:
+            function_name = result[0]
+            function_schema = result[1]
+            function_catalog = result[2]
+            return_type = result[3]
+            language = result[4]
+            function_definition = result[5]
+            argument_signature = result[6]
+            is_external = result[7]
+            api_integration = result[8]
+            
+            if is_external:
+                ddl = (
+                    f"CREATE OR REPLACE EXTERNAL FUNCTION {function_catalog}.{function_schema}.{function_name} {argument_signature} "
+                    f"RETURNS {return_type} "
+                    f"API_INTEGRATION = '{api_integration}' "
+                    f"AS '{function_definition}';"
+                )
+            else:
+                ddl = (
+                    f"CREATE OR REPLACE FUNCTION {function_catalog}.{function_schema}.{function_name} {argument_signature} "
+                    f"RETURNS {return_type} LANGUAGE {language} EXECUTE AS CALLER COPY GRANTS AS \n$$\n{function_definition}\n$$;"
+                )
+        else:
+            ddl = None
+        logging.info(f"Retrieved DDL for function '{function_name}': {ddl is not None}")
+    finally:
+        cursor.close()
+
+    return ddl
+
+def fn_get_procedure_ddl(session, object_name, schema_name, database):
+    """
+    Retrieve the DDL statement for a specified procedure.
+    
+    :param session: The Snowflake session.
+    :param object_name: The name of the procedure.
+    :param schema_name: The schema name.
+    :param database: The database name.
+    :return: The DDL statement for the procedure.
+    """
+    query = f"""
+    SELECT 'CREATE OR REPLACE PROCEDURE ' || PROCEDURE_CATALOG || '.' || PROCEDURE_SCHEMA || '.' || PROCEDURE_NAME || ARGUMENT_SIGNATURE ||
+           ' RETURNS VARCHAR(16777216) LANGUAGE ' || PROCEDURE_LANGUAGE || 
+           ' RUNTIME_VERSION = ''3.11'' PACKAGES = (''snowflake-snowpark-python'') HANDLER = ''main'' EXECUTE AS CALLER COPY GRANTS AS ' || CHR(10) ||
+           '$$' || PROCEDURE_DEFINITION || '$$'
+    FROM INFORMATION_SCHEMA.PROCEDURES
+    WHERE PROCEDURE_NAME = '{object_name.upper()}'
+    AND PROCEDURE_SCHEMA = '{schema_name.upper()}'
+    AND PROCEDURE_CATALOG = '{database.upper()}'
+    """
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        result = cursor.fetchone()
+        if result:
+            ddl = result[0]
+        else:
+            ddl = None
+        logging.info(f"Retrieved DDL for procedure '{object_name}': {ddl is not None}")
+    finally:
+        cursor.close()
+    return ddl
+
+def fn_get_stage_ddl(session, object_name, schema_name, database):
+    """
+    Retrieve the DDL statement for a specified stage.
+    
+    :param session: The Snowflake session.
+    :param object_name: The name of the stage.
+    :param schema_name: The schema name.
+    :param database: The database name.
+    :return: The DDL statement for the stage.
+    """
+    query = f""" SHOW STAGES IN {database.upper()}.{schema_name.upper()} """
+    cursor = session.cursor()
+    try:
+        cursor.execute(query)
+        while True:
+            result = cursor.fetchone()
+            if result:
+                stage_name = result[1].upper()
+                if stage_name == object_name.upper():
+                    stage_info = {
+                        'stage_name': result[1],
+                        'storage_integration': result[3],
+                        'url': result[4],
+                        'file_format_type': result[5],
+                        'strip_outer_array': result[6]
+                    }
+                    ddl = (
+                        f"CREATE OR REPLACE STAGE {stage_info['stage_name']}\n"
+                        f"    STORAGE_INTEGRATION = {stage_info['storage_integration']}\n"
+                        f"    URL = '{stage_info['url']}'\n"
+                        f"    FILE_FORMAT = (\n"
+                        f"        TYPE = '{stage_info['file_format_type']}'\n"
+                        f"        STRIP_OUTER_ARRAY = {stage_info['strip_outer_array']}\n"
+                        f"    );"
+                    )
+                    logging.info(f"Retrieved DDL for stage '{object_name}': {ddl}")
+                    return ddl
+            else:
+                logging.warning(f"Stage '{object_name}' not found")
+                return None
+    finally:
+        cursor.close()
+
+def create_directories_from_file(database, file_path):
+    """
+    Create directories based on object types specified in a file.
+    
+    :param database: The database name used to structure the directories.
+    :param file_path: The path to the file containing object types and names.
+    """
+    try:
+        with open(file_path, 'r') as file:
+            entries = file.readlines()
+
+        unique_object_types = set()
+        for entry in entries:
+            object_type = entry.strip().split(":")[0]
+            unique_object_types.add(object_type)
+
+        for obj_type in unique_object_types:
+            folder_path = os.path.join(base_output_dir, database, obj_type)
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
+                logging.info(f"Created directory for {obj_type}: {folder_path}")
+            else:
+                logging.info(f"Directory for {obj_type} already exists: {folder_path}")
+
+    except FileNotFoundError:
+        logging.error(f"File not found: {file_path}")
+
+def main():
+    """
+    Main function to process the object list and generate DDL files.
+    """
+    global input_file
+    global base_output_dir
+    global error_file
+    
+    # Define global file paths
+    input_file = r'C:\???\??\???\object_list.txt'
+    base_output_dir = r'C:\???\??\???\'
+    error_file = r'C:\???\??\???\object_list.txt\'
+
+    # List of databases to process
+    databases = ['DB1', 'DB2', '...','DBn']
+
+    # Read object names from the input file
+    with open(input_file, 'r') as file:
+        lines = file.readlines()
+        object_names = list(set(lines))
+
+    logging.info(f"Processing objects: {object_names}")
+
+    # Initialize lists to store objects of different types
+    tables = []
+    views = []
+    tasks = []
+    procedures = []
+    functions = []
+    stages = []
+    object_missed = []
+
+    for database in databases:
+        schema_name = 'UAT'
+        session = create_snowflake_session(database, schema_name)
+
+        try:
+            for line in object_names:
+                object_name = line.strip()
+                if not object_name:
+                    continue
+                logging.info(f"Processing object: {object_name}")
+                
+                # Check for object existence and categorize
+                if check_table_exists(session, object_name, schema_name):
+                    tables.append(object_name)
+                elif check_view_exists(session, object_name, schema_name):
+                    views.append(object_name)
+                elif check_task_exists(session, object_name, schema_name):
+                    tasks.append(object_name)
+                elif check_procedure_exists(session, object_name, schema_name):
+                    procedures.append(object_name)
+                elif check_function_exists(session, object_name, schema_name):
+                    functions.append(object_name)
+                elif check_stage_exists(session, object_name, schema_name):
+                    stages.append(object_name)
+                else:
+                    logging.warning(f"Skipping unknown or non-existent object: {object_name}")
+                    object_missed.append(f"Skipping object '{object_name}' - Possibly unknown entry or non-existent.")
+
+            # Generate the output file for object types
+            output_file = r'C:\???\??\???\Object_object_type.txt'
+            with open(output_file, 'w') as outfile:
+                for table in tables:
+                    outfile.write(f"TABLE:{table}\n")
+                for view in views:
+                    outfile.write(f"VIEW:{view}\n")
+                for procedure in procedures:
+                    outfile.write(f"PROCEDURE:{procedure}\n")
+                for function in functions:
+                    outfile.write(f"FUNCTION:{function}\n")
+                for task in tasks:
+                    outfile.write(f"TASK:{task}\n")
+                for stage in stages:
+                    outfile.write(f"STAGE:{stage}\n")
+
+            logging.info(f"Generated object type file: {output_file}")
+
+            create_directories_from_file(database, output_file)
+
+            with open(output_file, 'r') as file:
+                entries = file.readlines()
+
+            # Versioning setup
+
+            # #### Versioning starts here , we have to get the version from schema change db only, since all the deployment activities will be recorded the only.
+            # 
+            # cursor = session.cursor()
+            # query = """
+            #             SELECT version
+            #             FROM schema_change_db.change_history
+            #             ORDER BY INSTALLED_ON DESC
+            #             LIMIT 1;
+            #         """
+            # cursor.execute(query)
+            # result = cursor.fetchone()
+
+            # if result:
+            #     latest_release_version = result[0]
+            #     print(f"Latest release version: {latest_release_version}")
+            #     major, minor, _ = map(int, latest_release_version.split("."))
+            #     current_release_counter = major + 1
+            # else:
+            #     print("No release versions found.")
+            
+            # Lates release counter sould be fetched from DB and based on that we are calculating current release counter 
+            # latest_release_version will be replaced - in ## place like - {current_release_counter}.1.{table_counter}
+            #### We have hard codded the version here. 
+            
+            latest_release_version = "4.1.1"
+            current_release_counter = 3
+            table_counter = 1
+            view_counter = 1
+            task_counter = 1
+            procedure_counter = 1
+            function_counter = 1
+            stage_counter = 1
+
+            for entry in entries:
+                object_type, object_name = entry.strip().split(":")
+                logging.info(f"Generating DDL for {object_name} - {object_type}")
+                if object_type == "PROCEDURE":
+                    ddl_result = fn_get_procedure_ddl(session, object_name, schema_name, database)
+                    if ddl_result:
+                        logging.info(f"Procedure DDL for {object_name}: {ddl_result}")
+                    else:
+                        logging.info(f"No PROCEDURE DDL found for {object_name}.")
+                elif object_type == "FUNCTION":
+                    ddl_result = fn_get_function_ddl(session, object_name, schema_name, database)
+                    if ddl_result:
+                        logging.info(f"Function DDL for {object_name}: {ddl_result}")
+                    else:
+                        logging.info(f"No FUNCTION DDL found for {object_name}.")
+                elif object_type == "STAGE":
+                    ddl_result = fn_get_stage_ddl(session, object_name, schema_name, database)
+                    if ddl_result:
+                        logging.info(f"Stage DDL for {object_name}: {ddl_result}")
+                    else:
+                        logging.info(f"No STAGE DDL found for {object_name}.")
+                elif object_type == "TASK":
+                    ddl_query = f"SELECT GET_DDL('{object_type.upper()}', '{object_name}')"
+                    cursor = session.cursor()
+                    cursor.execute(ddl_query)
+                    ddl_result = cursor.fetchone()[0]
+                    
+                    has_begin = re.search(r'\bBEGIN\b', ddl_result, re.IGNORECASE)
+                    has_end = re.search(r'\bEND\b', ddl_result, re.IGNORECASE)
+                    has_execute_immediate = re.search(r'\bEXECUTE IMMEDIATE\b', ddl_result, re.IGNORECASE)
+
+                    if not (has_begin and has_end and has_execute_immediate):
+                        as_match = re.search(r'\b\s*as\s*\b', ddl_result, flags=re.IGNORECASE)
+                        if as_match:
+                            as_index = as_match.end()
+                        else:
+                            as_index = -1
+                        if as_index != -1:
+                            part1 = ddl_result[:as_index].strip()
+                            part2 = ddl_result[as_index:].strip()
+                        else:
+                            part1 = ddl_result.strip()
+                            part2 = ""
+                        updated_task = f"{part1}\nEXECUTE IMMEDIATE $$\n{part2}\n$$;"
+                        ddl_result = updated_task
+                    
+                    logging.info(f"Updated TASK DDL: {ddl_result}")
+
+                elif object_type == "TABLE":
+                    ddl_query = f"SELECT REPLACE(GET_DDL('{object_type.upper()}', '{object_name}'), ');', ') COPY GRANTS;')"
+                    cursor = session.cursor()
+                    cursor.execute(ddl_query)
+                    ddl_result = cursor.fetchone()[0]
+                else:
+                    ddl_query = f"SELECT GET_DDL('{object_type.upper()}', '{object_name}')"
+                    cursor = session.cursor()
+                    cursor.execute(ddl_query)
+                    ddl_result = cursor.fetchone()[0]
+
+                if object_type.lower() == 'table':
+                    index = f"{current_release_counter}.1.{table_counter}"
+                    table_counter += 1
+                elif object_type.lower() == 'view':
+                    index = f"{current_release_counter}.2.{view_counter}"
+                    view_counter += 1
+                elif object_type.lower() == 'task':
+                    index = f"{current_release_counter}.3.{task_counter}"
+                    task_counter += 1
+                elif object_type.lower() == 'procedure':
+                    index = f"{current_release_counter}.4.{procedure_counter}"
+                    procedure_counter += 1
+                elif object_type.lower() == 'function':
+                    index = f"{current_release_counter}.5.{function_counter}"
+                    function_counter += 1
+                elif object_type.lower() == 'stage':
+                    index = f"{current_release_counter}.6.{stage_counter}"
+                    stage_counter += 1
+                
+                # Save DDL to file
+                output_file = os.path.join(base_output_dir, database, object_type, f"V{index}__{object_name}.sql")
+                with open(output_file, 'w') as outfile:
+                    outfile.write(ddl_result)
+                logging.info(f"Saved DDL to {output_file}")
+
+        except Exception as e:
+            object_missed.append(f"Error processing object '{object_name}' in database '{database}': {str(e)}")
+        finally:
+            session.close()
+
+    # Log errors to file
+    with open(error_file, 'w') as errfile:
+        for error in object_missed:
+            errfile.write(f"{error}\n")
+
+if __name__ == "__main__":
+    main()
